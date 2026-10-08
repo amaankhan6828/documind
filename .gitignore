@@ -17,4 +17,5 @@ npm-debug.log*
 .env.*
 !.env.example
 coverage/
+storage/
 .DS_Store
