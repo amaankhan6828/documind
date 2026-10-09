@@ -82,6 +82,8 @@ The document API manages metadata and supports PDF/DOCX version uploads at `POST
 
 Milestone 4A replaces the placeholder worker with a Docling adapter restricted to the stored PDF/DOCX file. The worker persists parser-reported pages, section headings, text, tables, and figure references in PostgreSQL. Extracted elements retain source references and available page, bounding-box, and character-span provenance; missing page information stays missing. Selectable-text PDFs use Docling's model-free native pipeline; image-only PDFs use Docling's standard pipeline with local Tesseract OCR. Milestone 4B groups canonical elements into deterministic chunks under configurable `CHUNK_MAX_CHARACTERS` and `CHUNK_OVERLAP_CHARACTERS` limits. Tables stay intact as standalone chunks. Milestones 4C.1 and 4C.2 asynchronously project these chunks into Qdrant for dense retrieval and OpenSearch for tenant-filtered BM25 lexical retrieval; all canonical text remains in PostgreSQL. Run `python -m backend.app.retrieval.rebuild_opensearch` to recreate the lexical index from PostgreSQL. See [Milestone 4A notes](docs/milestone-4a-document-intelligence.md), [Milestone 4B notes](docs/milestone-4b-chunking.md), [Milestone 4C.1 notes](docs/milestone-4c1-dense-indexing.md), and [Milestone 4C.2 notes](docs/milestone-4c2-lexical-indexing.md).
 
+To measure retrieval quality against independently judged canonical chunk IDs, prepare a benchmark and run the dense/lexical/hybrid evaluation harness. See [retrieval evaluation instructions](docs/retrieval-evaluation.md); no quality baseline is reported until relevance labels are reviewed.
+
 ### Frontend
 
 In another terminal:
