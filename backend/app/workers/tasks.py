@@ -21,6 +21,7 @@ from backend.app.models import (
     ProcessingJob,
     ProcessingJobStatus,
 )
+from backend.app.retrieval.opensearch_tasks import index_lexical_document_version_task
 from backend.app.retrieval.tasks import index_document_version_task
 from backend.app.workers.celery_app import celery_app
 
@@ -137,6 +138,15 @@ def _process_structure(job_id: UUID) -> str:
     except Exception:
         logger.warning(
             "Could not enqueue dense indexing for document version %s; "
+            "canonical chunks remain committed and can be rebuilt",
+            indexed_version_id,
+            exc_info=True,
+        )
+    try:
+        index_lexical_document_version_task.delay(str(indexed_version_id))
+    except Exception:
+        logger.warning(
+            "Could not enqueue lexical indexing for document version %s; "
             "canonical chunks remain committed and can be rebuilt",
             indexed_version_id,
             exc_info=True,

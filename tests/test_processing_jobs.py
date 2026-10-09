@@ -239,6 +239,17 @@ def test_worker_completes_job_and_repeated_invocation_is_idempotent(
         "delay",
         lambda version_id: queued_index_versions.append(version_id),
     )
+    attempted_lexical_versions: list[str] = []
+
+    def lexical_broker_unavailable(version_id: str) -> None:
+        attempted_lexical_versions.append(version_id)
+        raise ConnectionError("test lexical broker outage")
+
+    monkeypatch.setattr(
+        tasks.index_lexical_document_version_task,
+        "delay",
+        lexical_broker_unavailable,
+    )
 
     result = tasks.process_document.apply(args=[str(job_id)], throw=False)
     db_session.expire_all()
@@ -274,6 +285,7 @@ def test_worker_completes_job_and_repeated_invocation_is_idempotent(
     assert chunk_source.document_element_id == element.id
     assert chunk_source.page_id == page.id
     assert queued_index_versions == [str(job.document_version_id)]
+    assert attempted_lexical_versions == [str(job.document_version_id)]
 
     repeated = tasks.process_document.apply(args=[str(job_id)], throw=True)
     db_session.expire_all()
@@ -307,6 +319,7 @@ def test_qdrant_enqueue_failure_does_not_rollback_canonical_processing(
         raise ConnectionError("test broker outage")
 
     monkeypatch.setattr(tasks.index_document_version_task, "delay", queue_unavailable)
+    monkeypatch.setattr(tasks.index_lexical_document_version_task, "delay", queue_unavailable)
     result = tasks.process_document.apply(args=[str(job_id)], throw=True)
     db_session.expire_all()
     job = db_session.get(ProcessingJob, job_id)

@@ -31,6 +31,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-documind_chunks}
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-documind_chunks}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-384}
       INDEX_BATCH_SIZE: ${INDEX_BATCH_SIZE:-64}
@@ -42,6 +44,8 @@ services:
       redis:
         condition: service_healthy
       qdrant:
+        condition: service_started
+      opensearch:
         condition: service_started
 
   worker:
@@ -60,6 +64,8 @@ services:
       CHUNK_OVERLAP_CHARACTERS: ${CHUNK_OVERLAP_CHARACTERS:-200}
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-documind_chunks}
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-documind_chunks}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-384}
       INDEX_BATCH_SIZE: ${INDEX_BATCH_SIZE:-64}
@@ -71,6 +77,8 @@ services:
       redis:
         condition: service_healthy
       qdrant:
+        condition: service_started
+      opensearch:
         condition: service_started
 
   redis:
@@ -90,6 +98,17 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
 
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "127.0.0.1:${OPENSEARCH_PORT:-9200}:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+
   frontend:
     build:
       context: .
@@ -102,3 +121,4 @@ services:
 volumes:
   postgres_data:
   qdrant_data:
+  opensearch_data:

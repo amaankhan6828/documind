@@ -8,9 +8,9 @@ The foundation includes FastAPI, a minimal Next.js/TypeScript shell, PostgreSQL,
 
 Milestone 2A added Argon2id password hashing and JWT bearer authentication. Milestone 2B added authenticated tenant-scoped document metadata CRUD. Milestone 2C added PDF/DOCX upload, local file storage, SHA-256 checksums, and document version records. Milestone 3 added PostgreSQL-backed processing jobs, Redis task transport, a Celery worker, and tenant-scoped job status. Milestone 4A uses Docling in the worker to convert uploaded PDF/DOCX versions into canonical PostgreSQL pages, sections, text, table, and figure records with parser-provided provenance.
 
-Milestone 4B derives canonical structural chunks from those records and stores them in PostgreSQL with source-element and page provenance. Milestone 4C.1 adds a rebuildable Qdrant dense index over those chunks using local Sentence Transformers embeddings; PostgreSQL remains canonical.
+Milestone 4B derives canonical structural chunks from those records and stores them in PostgreSQL with source-element and page provenance. Milestone 4C.1 adds a rebuildable Qdrant dense index over those chunks using local Sentence Transformers embeddings. Milestone 4C.2 adds a rebuildable OpenSearch BM25 lexical index over the same canonical chunks. PostgreSQL remains canonical for both derived indexes.
 
-Authentication does not include RBAC, tenant administration, refresh tokens, OAuth, password reset, or email verification. Files are stored locally. OpenSearch/BM25, hybrid retrieval, reranking, knowledge graphs, LLM answers, and RAG are not implemented.
+Authentication does not include RBAC, tenant administration, refresh tokens, OAuth, password reset, or email verification. Files are stored locally. Hybrid retrieval, reranking, knowledge graphs, LLM answers, and RAG are not implemented.
 
 ## Prerequisites
 
@@ -80,7 +80,7 @@ The document API manages metadata and supports PDF/DOCX version uploads at `POST
 
 ### Document intelligence
 
-Milestone 4A replaces the placeholder worker with a Docling adapter restricted to the stored PDF/DOCX file. The worker persists parser-reported pages, section headings, text, tables, and figure references in PostgreSQL. Extracted elements retain source references and available page, bounding-box, and character-span provenance; missing page information stays missing. Selectable-text PDFs use Docling's model-free native pipeline; image-only PDFs use Docling's standard pipeline with local Tesseract OCR. Milestone 4B groups canonical elements into deterministic chunks under configurable `CHUNK_MAX_CHARACTERS` and `CHUNK_OVERLAP_CHARACTERS` limits. Tables stay intact as standalone chunks. Milestone 4C.1 asynchronously projects these chunks into Qdrant with tenant-filtered dense search; all canonical text remains in PostgreSQL. See [Milestone 4A notes](docs/milestone-4a-document-intelligence.md), [Milestone 4B notes](docs/milestone-4b-chunking.md), and [Milestone 4C.1 notes](docs/milestone-4c1-dense-indexing.md).
+Milestone 4A replaces the placeholder worker with a Docling adapter restricted to the stored PDF/DOCX file. The worker persists parser-reported pages, section headings, text, tables, and figure references in PostgreSQL. Extracted elements retain source references and available page, bounding-box, and character-span provenance; missing page information stays missing. Selectable-text PDFs use Docling's model-free native pipeline; image-only PDFs use Docling's standard pipeline with local Tesseract OCR. Milestone 4B groups canonical elements into deterministic chunks under configurable `CHUNK_MAX_CHARACTERS` and `CHUNK_OVERLAP_CHARACTERS` limits. Tables stay intact as standalone chunks. Milestones 4C.1 and 4C.2 asynchronously project these chunks into Qdrant for dense retrieval and OpenSearch for tenant-filtered BM25 lexical retrieval; all canonical text remains in PostgreSQL. Run `python -m backend.app.retrieval.rebuild_opensearch` to recreate the lexical index from PostgreSQL. See [Milestone 4A notes](docs/milestone-4a-document-intelligence.md), [Milestone 4B notes](docs/milestone-4b-chunking.md), [Milestone 4C.1 notes](docs/milestone-4c1-dense-indexing.md), and [Milestone 4C.2 notes](docs/milestone-4c2-lexical-indexing.md).
 
 ### Frontend
 
@@ -96,10 +96,10 @@ Open `http://localhost:3000`.
 
 ### Full local stack with Docker Compose
 
-After copying `.env.example` to `.env`, start PostgreSQL, Redis, Qdrant, the API, Celery worker, and the frontend:
+After copying `.env.example` to `.env`, start PostgreSQL, Redis, Qdrant, OpenSearch, the API, Celery worker, and the frontend:
 
 ```bash
 docker compose up --build
 ```
 
-Apply the schema with the Alembic command above before using database-backed features. Compose starts Redis as the Celery broker and Qdrant as the derived dense index; PostgreSQL remains the source of truth for jobs, document structure, and chunks. See `docs/milestone-4c1-dense-indexing.md` for Qdrant setup, retrieval service usage, and index rebuild instructions.
+Apply the schema with the Alembic command above before using database-backed features. Compose starts Redis as the Celery broker, Qdrant as the derived dense index, and a local security-disabled OpenSearch service as the derived BM25 index. OpenSearch is bound to localhost and uses no credentials only for local development; do not expose this configuration in shared or production environments. PostgreSQL remains the source of truth for jobs, document structure, and chunks. See `docs/milestone-4c1-dense-indexing.md` for Qdrant setup and `docs/milestone-4c2-lexical-indexing.md` for OpenSearch configuration, tenant-filtered BM25 search, and rebuilding.

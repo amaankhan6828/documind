@@ -37,3 +37,11 @@ class DenseCandidate(BaseModel):
     chunk_id: UUID
     score: float
     payload: dict
+
+
+class LexicalCandidate(BaseModel):
+    """A BM25 OpenSearch hit with canonical text and provenance metadata."""
+
+    chunk_id: UUID
+    score: float
+    payload: dict

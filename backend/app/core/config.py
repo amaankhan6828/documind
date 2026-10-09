@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     chunk_overlap_characters: int = Field(default=200, ge=0, le=99999)
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "documind_chunks"
+    opensearch_url: str = "http://localhost:9200"
+    opensearch_index: str = "documind_chunks"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimension: int = Field(default=384, gt=0, le=65536)
     index_batch_size: int = Field(default=64, gt=0, le=4096)
