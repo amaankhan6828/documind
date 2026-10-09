@@ -21,3 +21,5 @@ No database migration is required; this milestone adds no PostgreSQL tables or c
 ## Hybrid retrieval
 
 The internal `search_hybrid(tenant_id, query_text, ...)` combines the existing dense and lexical candidate lists using reciprocal rank fusion (RRF), without mixing their incomparable raw scores. Each one-based rank contributes `1 / (rrf_k + rank)`; `rrf_k` defaults to 60. A canonical chunk found by both retrievers appears once with both contributions. Results retain available payload provenance and each retriever's rank and score, and equal fused scores are ordered by chunk UUID. Dense and lexical candidate limits are independent of the final result limit. Tenant identity is supplied explicitly to both adapters, not taken from search filters.
+
+The authenticated `POST /api/v1/search/hybrid` endpoint obtains tenant identity from the bearer-authenticated user, rejects extra request fields (including `tenant_id`), and returns typed fused candidates. Qdrant or OpenSearch service errors produce `503 Service Unavailable`.

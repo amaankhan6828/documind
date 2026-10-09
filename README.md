@@ -10,7 +10,7 @@ Milestone 2A added Argon2id password hashing and JWT bearer authentication. Mile
 
 Milestone 4B derives canonical structural chunks from those records and stores them in PostgreSQL with source-element and page provenance. Milestone 4C.1 adds a rebuildable Qdrant dense index over those chunks using local Sentence Transformers embeddings. Milestone 4C.2 adds a rebuildable OpenSearch BM25 lexical index over the same canonical chunks. Milestone 4C.3 combines dense and lexical candidates using tenant-scoped reciprocal rank fusion. PostgreSQL remains canonical for both derived indexes.
 
-Authentication does not include RBAC, tenant administration, refresh tokens, OAuth, password reset, or email verification. Files are stored locally. Public hybrid search endpoints, reranking, knowledge graphs, LLM answers, and RAG are not implemented.
+Authentication does not include RBAC, tenant administration, refresh tokens, OAuth, password reset, or email verification. Files are stored locally. Reranking, knowledge graphs, LLM answers, and RAG are not implemented.
 
 ## Prerequisites
 
