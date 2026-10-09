@@ -2,11 +2,11 @@
 
 import hashlib
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 from qdrant_client import QdrantClient, models
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.chunking.persistence import replace_document_chunks
@@ -22,6 +22,7 @@ from backend.app.models import (
     Tenant,
 )
 from backend.app.retrieval.indexing import (
+    index_document_version,
     index_records,
     load_index_records,
     payload_for,
@@ -52,6 +53,7 @@ class FakeQdrant:
         self.exists = False
         self.points: dict[str, models.PointStruct] = {}
         self.upsert_calls: list[list[models.PointStruct]] = []
+        self.delete_calls: list[list[str]] = []
 
     def collection_exists(self, _name: str) -> bool:
         return self.exists
@@ -83,6 +85,34 @@ class FakeQdrant:
     def upsert(self, *, points, **_kwargs) -> bool:
         self.upsert_calls.append(points)
         self.points.update({str(point.id): point for point in points})
+        return True
+
+    def scroll(self, *, scroll_filter, limit, offset=None, **_kwargs):
+        matching = [
+            point
+            for point in self.points.values()
+            if all(
+                point.payload.get(condition.key)
+                == condition.match.value
+                for condition in scroll_filter.must
+            )
+        ]
+        start = int(offset or 0)
+        page = matching[start : start + limit]
+        next_offset = start + limit if start + limit < len(matching) else None
+        return (
+            [
+                SimpleNamespace(id=point.id, payload=point.payload)
+                for point in page
+            ],
+            next_offset,
+        )
+
+    def delete(self, *, points_selector, **_kwargs) -> bool:
+        point_ids = [str(point_id) for point_id in points_selector.points]
+        self.delete_calls.append(point_ids)
+        for point_id in point_ids:
+            self.points.pop(point_id, None)
         return True
 
     def query_points(self, *, query_filter, limit, **_kwargs):
@@ -135,6 +165,83 @@ def make_record(*, tenant_id=None, text: str = "Revenue was 42") -> IndexRecord:
                 page_number=3,
             )
         ],
+    )
+
+
+def make_index_factory():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as session:
+        tenant = Tenant(name="Incremental index tenant", slug="incremental-index-tenant")
+        session.add(tenant)
+        session.flush()
+        document = Document(
+            tenant_id=tenant.id,
+            title="Incremental index report",
+            document_type="annual_report",
+            issuer="Example Corp",
+        )
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            tenant_id=tenant.id,
+            document_id=document.id,
+            version_number=1,
+        )
+        session.add(version)
+        session.flush()
+        session.commit()
+        identifiers = (tenant.id, document.id, version.id)
+    return engine, factory, identifiers
+
+
+def replace_index_chunks(
+    factory: sessionmaker[Session],
+    *,
+    tenant_id,
+    document_id,
+    document_version_id,
+    texts: list[str],
+) -> list[str]:
+    chunk_ids = [
+        uuid5(
+            NAMESPACE_URL,
+            f"documind:{document_version_id}:{ordinal}:"
+            f"{hashlib.sha256(text.encode()).hexdigest()}",
+        )
+        for ordinal, text in enumerate(texts)
+    ]
+    with factory() as session:
+        session.execute(
+            delete(DocumentChunk).where(
+                DocumentChunk.document_version_id == document_version_id
+            )
+        )
+        session.add_all(
+            DocumentChunk(
+                id=chunk_id,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                document_version_id=document_version_id,
+                ordinal=ordinal,
+                text=text,
+                character_length=len(text),
+                content_hash=hashlib.sha256(text.encode()).hexdigest(),
+            )
+            for ordinal, (chunk_id, text) in enumerate(zip(chunk_ids, texts, strict=True))
+        )
+        session.commit()
+    return [str(chunk_id) for chunk_id in chunk_ids]
+
+
+def run_version_index(factory, client, version_id) -> int:
+    return index_document_version(
+        version_id,
+        session_factory=factory,
+        client=client,
+        embedder=FakeEmbedder(),
+        settings=make_settings(),
     )
 
 
@@ -216,6 +323,223 @@ def test_qdrant_write_failure_is_reported_as_retryable_index_failure() -> None:
             embedder=FakeEmbedder(),
             settings=make_settings(),
         )
+
+
+def test_incremental_index_keeps_unchanged_chunks_and_is_idempotent() -> None:
+    engine, factory, (tenant_id, document_id, version_id) = make_index_factory()
+    client = FakeQdrant()
+    try:
+        current_ids = replace_index_chunks(
+            factory,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=version_id,
+            texts=["First canonical chunk", "Second canonical chunk"],
+        )
+        assert run_version_index(factory, client, version_id) == 2
+        original_points = dict(client.points)
+        assert run_version_index(factory, client, version_id) == 2
+        assert set(client.points) == set(current_ids)
+        assert client.points == original_points
+        assert client.delete_calls == []
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_incremental_index_adds_new_canonical_chunks() -> None:
+    engine, factory, (tenant_id, document_id, version_id) = make_index_factory()
+    client = FakeQdrant()
+    try:
+        replace_index_chunks(
+            factory,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=version_id,
+            texts=["Existing chunk"],
+        )
+        assert run_version_index(factory, client, version_id) == 1
+        current_ids = replace_index_chunks(
+            factory,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=version_id,
+            texts=["Existing chunk", "New chunk"],
+        )
+        assert run_version_index(factory, client, version_id) == 2
+        assert set(client.points) == set(current_ids)
+        assert client.delete_calls == []
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_incremental_index_deletes_removed_canonical_chunks() -> None:
+    engine, factory, (tenant_id, document_id, version_id) = make_index_factory()
+    client = FakeQdrant()
+    try:
+        original_ids = replace_index_chunks(
+            factory,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=version_id,
+            texts=["Keep this chunk", "Remove this chunk"],
+        )
+        run_version_index(factory, client, version_id)
+        current_ids = replace_index_chunks(
+            factory,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=version_id,
+            texts=["Keep this chunk"],
+        )
+        assert run_version_index(factory, client, version_id) == 1
+        assert set(client.points) == set(current_ids)
+        assert client.delete_calls == [[next(iter(set(original_ids) - set(current_ids)))]]
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_incremental_index_with_zero_chunks_removes_version_points() -> None:
+    engine, factory, (tenant_id, document_id, version_id) = make_index_factory()
+    client = FakeQdrant()
+    try:
+        replace_index_chunks(
+            factory,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=version_id,
+            texts=["Now obsolete"],
+        )
+        run_version_index(factory, client, version_id)
+        replace_index_chunks(
+            factory,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=version_id,
+            texts=[],
+        )
+        assert run_version_index(factory, client, version_id) == 0
+        assert client.points == {}
+        assert len(client.delete_calls) == 1
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_incremental_index_preserves_other_versions_and_tenants() -> None:
+    engine, factory, (tenant_id, document_id, version_id) = make_index_factory()
+    client = FakeQdrant()
+    try:
+        current_ids = replace_index_chunks(
+            factory,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=version_id,
+            texts=["Current canonical chunk"],
+        )
+        run_version_index(factory, client, version_id)
+        other_version = make_record(tenant_id=tenant_id)
+        other_version_payload = payload_for(other_version)
+        other_version_payload["document_version_id"] = str(uuid4())
+        other_tenant = make_record(tenant_id=uuid4())
+        other_tenant_payload = payload_for(other_tenant)
+        client.upsert(
+            points=[
+                models.PointStruct(
+                    id=str(other_version.chunk_id),
+                    vector=[1.0, 0.0, 0.0],
+                    payload=other_version_payload,
+                ),
+                models.PointStruct(
+                    id=str(other_tenant.chunk_id),
+                    vector=[1.0, 0.0, 0.0],
+                    payload=other_tenant_payload,
+                ),
+            ]
+        )
+        protected_ids = {str(other_version.chunk_id), str(other_tenant.chunk_id)}
+
+        assert run_version_index(factory, client, version_id) == 1
+
+        assert set(client.points) == set(current_ids) | protected_ids
+        assert all(
+            protected_id not in deleted_ids
+            for deleted_ids in client.delete_calls
+            for protected_id in protected_ids
+        )
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_incremental_upsert_failure_does_not_delete_existing_points() -> None:
+    class FailingUpsertQdrant(FakeQdrant):
+        def upsert(self, **_kwargs):
+            raise ConnectionError("temporary Qdrant outage")
+
+    engine, factory, (tenant_id, document_id, version_id) = make_index_factory()
+    client = FailingUpsertQdrant()
+    stale_record = make_record(tenant_id=tenant_id)
+    client.exists = True
+    client.vector_size = 3
+    stale_payload = payload_for(stale_record)
+    stale_payload["document_id"] = str(document_id)
+    stale_payload["document_version_id"] = str(version_id)
+    client.points[str(stale_record.chunk_id)] = models.PointStruct(
+        id=str(stale_record.chunk_id),
+        vector=[1.0, 0.0, 0.0],
+        payload=stale_payload,
+    )
+    try:
+        replace_index_chunks(
+            factory,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=version_id,
+            texts=["Current canonical chunk"],
+        )
+        with pytest.raises(QdrantIndexError, match="upsert failed"):
+            run_version_index(factory, client, version_id)
+        assert client.delete_calls == []
+        assert str(stale_record.chunk_id) in client.points
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_incremental_index_reports_obsolete_point_deletion_failure() -> None:
+    class FailingDeleteQdrant(FakeQdrant):
+        def delete(self, **_kwargs):
+            raise ConnectionError("temporary Qdrant outage")
+
+    engine, factory, (tenant_id, document_id, version_id) = make_index_factory()
+    client = FailingDeleteQdrant()
+    stale_record = make_record(tenant_id=tenant_id)
+    client.exists = True
+    client.vector_size = 3
+    stale_payload = payload_for(stale_record)
+    stale_payload["document_id"] = str(document_id)
+    stale_payload["document_version_id"] = str(version_id)
+    client.points[str(stale_record.chunk_id)] = models.PointStruct(
+        id=str(stale_record.chunk_id),
+        vector=[1.0, 0.0, 0.0],
+        payload=stale_payload,
+    )
+    try:
+        replace_index_chunks(
+            factory,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=version_id,
+            texts=["Current canonical chunk"],
+        )
+        with pytest.raises(QdrantIndexError, match="delete obsolete"):
+            run_version_index(factory, client, version_id)
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
 
 
 def test_rebuild_reads_postgres_chunks_in_batches_and_reuses_ids() -> None:

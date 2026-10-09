@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.core.config import Settings, get_settings
 from backend.app.db.session import get_session_factory
-from backend.app.models import Document, DocumentChunk, DocumentChunkSource
+from backend.app.models import Document, DocumentChunk, DocumentChunkSource, DocumentVersion
 from backend.app.retrieval.embeddings import EmbeddingProvider, get_embedding_provider
 from backend.app.retrieval.qdrant import (
     QdrantIndexError,
@@ -170,8 +170,18 @@ def index_document_version(
         from backend.app.retrieval.qdrant import get_qdrant_client
 
         client = get_qdrant_client()
+    with selected_factory() as session:
+        tenant_id = session.scalar(
+            select(DocumentVersion.tenant_id).where(
+                DocumentVersion.id == document_version_id
+            )
+        )
+    if tenant_id is None:
+        return 0
+
     total = 0
     last_id: UUID | None = None
+    current_chunk_ids: set[str] = set()
     while True:
         with selected_factory() as session:
             records = load_index_records(
@@ -181,11 +191,78 @@ def index_document_version(
                 document_version_id=document_version_id,
             )
         if not records:
-            return total
+            break
         total += index_records(
             records, client=client, embedder=selected_embedder, settings=selected_settings
         )
+        current_chunk_ids.update(str(record.chunk_id) for record in records)
         last_id = records[-1].chunk_id
+    ensure_collection(
+        client, selected_settings, dimension=selected_embedder.dimension
+    )
+    _delete_obsolete_points(
+        client,
+        settings=selected_settings,
+        tenant_id=tenant_id,
+        document_version_id=document_version_id,
+        current_chunk_ids=current_chunk_ids,
+    )
+    return total
+
+
+def _delete_obsolete_points(
+    client: QdrantClient,
+    *,
+    settings: Settings,
+    tenant_id: UUID,
+    document_version_id: UUID,
+    current_chunk_ids: set[str],
+) -> None:
+    """Delete only stale points for the successfully indexed version and tenant."""
+    version_filter = models.Filter(
+        must=[
+            models.FieldCondition(
+                key="document_version_id",
+                match=models.MatchValue(value=str(document_version_id)),
+            ),
+            models.FieldCondition(
+                key="tenant_id",
+                match=models.MatchValue(value=str(tenant_id)),
+            ),
+        ]
+    )
+    obsolete_point_ids: list[str] = []
+    offset: int | str | UUID | None = None
+    try:
+        while True:
+            points, next_offset = client.scroll(
+                collection_name=settings.qdrant_collection,
+                scroll_filter=version_filter,
+                limit=256,
+                offset=offset,
+                with_payload=False,
+            )
+            obsolete_point_ids.extend(
+                str(point.id)
+                for point in points
+                if str(point.id) not in current_chunk_ids
+            )
+            if next_offset is None:
+                break
+            offset = next_offset
+    except Exception as exc:
+        raise QdrantIndexError("could not find obsolete Qdrant points") from exc
+
+    if not obsolete_point_ids:
+        return
+    try:
+        client.delete(
+            collection_name=settings.qdrant_collection,
+            points_selector=models.PointIdsList(points=obsolete_point_ids),
+            wait=True,
+        )
+    except Exception as exc:
+        raise QdrantIndexError("could not delete obsolete Qdrant points") from exc
 
 
 def rebuild_index(
