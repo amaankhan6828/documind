@@ -45,3 +45,15 @@ class LexicalCandidate(BaseModel):
     chunk_id: UUID
     score: float
     payload: dict
+
+
+class HybridCandidate(BaseModel):
+    """An RRF-fused result retaining available dense and lexical evidence."""
+
+    chunk_id: UUID
+    score: float
+    payload: dict
+    dense_rank: int | None = None
+    dense_score: float | None = None
+    lexical_rank: int | None = None
+    lexical_score: float | None = None
